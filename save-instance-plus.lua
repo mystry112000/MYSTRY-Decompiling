@@ -1009,12 +1009,13 @@ local function save_instance(instance, buf, refMap, options)
         end
     end
 
-    -- Script source handling
+    -- Script source handling (MYSTRY Watermark added here)
     if is_lua_source_container(instance) then
         local source = decompile_script(instance, options)
         if source then
+            local watermark = "-- Decompiled by MYSTRY | Join discord.gg/Mppf6wXe\n\n"
             table.insert(buf, string.format('<ProtectedString name="Source">%s</ProtectedString>',
-                cdata_wrap(source)))
+                cdata_wrap(watermark .. source)))
         end
 
         -- Bytecode if requested
