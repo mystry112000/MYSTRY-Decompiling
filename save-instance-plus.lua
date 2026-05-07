@@ -1051,6 +1051,214 @@ local function save_instance(instance, buf, refMap, options)
 end
 
 -- ========================================
+-- 20. SAVE TERRAIN (Voxel Extraction)
+-- ========================================
+
+-- Purpose: Saves the actual Terrain geometry (grass, water, mountains, etc.)
+-- without this, you'd get an empty map with just buildings floating in void.
+-- Uses ReadVoxels() to scan the entire world and exports as FillBlock XML.
+
+local function save_terrain(terrain, buf, refMap, loader)
+    if not terrain or not terrain:IsA("Terrain") then return end
+
+    loader:update("Terrain", 90, "Reading terrain voxels...")
+
+    local workspace = game:GetService("Workspace")
+    local currentRegion = Region3int16.new(
+        Vector3int16.new(
+            math.floor(workspace.TerrainRegion.Min.X / 4),
+            math.floor(workspace.TerrainRegion.Min.Y / 4),
+            math.floor(workspace.TerrainRegion.Min.Z / 4)
+        ),
+        Vector3int16.new(
+            math.ceil(workspace.TerrainRegion.Max.X / 4),
+            math.ceil(workspace.TerrainRegion.Max.Y / 4),
+            math.ceil(workspace.TerrainRegion.Max.Z / 4)
+        )
+    )
+
+    local materials, occupations = terrain:ReadVoxels(currentRegion)
+    local cellSize = 4
+    local blocks = {}
+    local totalVoxels = 0
+
+    loader:update("Terrain", 92, "Scanning voxel grid...")
+
+    -- Build a map of contiguous blocks by material
+    local function add_block(pos, size, material)
+        table.insert(blocks, {
+            pos = pos,
+            size = size,
+            material = material
+        })
+    end
+
+    -- Simple greedy block building: group adjacent same-material voxels
+    local sx, sy, sz = materials.Size.X, materials.Size.Y, materials.Size.Z
+    local visited = {}
+
+    for x = 1, sx do
+        for y = 1, sy do
+            for z = 1, sz do
+                local key = x .. "," .. y .. "," .. z
+                if visited[key] then continue end
+
+                local mat = materials[x][y][z]
+                local occ = occupations[x][y][z]
+
+                if mat ~= Enum.Material.Air and occ > 0.1 then
+                    totalVoxels = totalVoxels + 1
+
+                    -- Expand in X direction
+                    local ex = x
+                    while ex < sx and not visited[ex+1 .. "," .. y .. "," .. z] do
+                        local nMat = materials[ex+1][y][z]
+                        local nOcc = occupations[ex+1][y][z]
+                        if nMat == mat and nOcc > 0.1 then
+                            ex = ex + 1
+                        else
+                            break
+                        end
+                    end
+
+                    -- Expand in Z direction
+                    local ez = z
+                    local canExpandZ = true
+                    while canExpandZ and ez < sz do
+                        for cx = x, ex do
+                            local nKey = cx .. "," .. y .. "," .. ez+1
+                            if visited[nKey] then
+                                canExpandZ = false
+                                break
+                            end
+                            if materials[cx][y][ez+1] ~= mat or occupations[cx][y][ez+1] <= 0.1 then
+                                canExpandZ = false
+                                break
+                            end
+                        end
+                        if canExpandZ then ez = ez + 1 end
+                    end
+
+                    -- Expand in Y direction
+                    local ey = y
+                    local canExpandY = true
+                    while canExpandY and ey < sy do
+                        for cx = x, ex do
+                            for cz = z, ez do
+                                local nKey = cx .. "," .. ey+1 .. "," .. cz
+                                if visited[nKey] then
+                                    canExpandY = false
+                                    break
+                                end
+                                if materials[cx][ey+1][cz] ~= mat or occupations[cx][ey+1][cz] <= 0.1 then
+                                    canExpandY = false
+                                    break
+                                end
+                            end
+                            if not canExpandY then break end
+                        end
+                        if canExpandY then ey = ey + 1 end
+                    end
+
+                    -- Mark visited and create block
+                    for cx = x, ex do
+                        for cy = y, ey do
+                            for cz = z, ez do
+                                visited[cx .. "," .. cy .. "," .. cz] = true
+                            end
+                        end
+                    end
+
+                    local wx = (x - 1) * cellSize
+                    local wy = (y - 1) * cellSize
+                    local wz = (z - 1) * cellSize
+                    local wsx = (ex - x + 1) * cellSize
+                    local wsy = (ey - y + 1) * cellSize
+                    local wsz = (ez - z + 1) * cellSize
+
+                    add_block(
+                        Vector3.new(wx, wy, wz),
+                        Vector3.new(wsx, wsy, wsz),
+                        mat
+                    )
+                end
+            end
+        end
+    end
+
+    loader:update("Terrain", 95, string.format("Found %d terrain blocks, writing XML...", #blocks))
+
+    -- Write Terrain item with MaterialColors
+    local terrainRef = get_ref(terrain)
+    refMap[terrain] = terrainRef
+
+    table.insert(buf, '<Item class="Terrain" referent="' .. terrainRef .. '">')
+    table.insert(buf, '<Properties>')
+    table.insert(buf, '<string name="Name">Terrain</string>')
+
+    -- MaterialColors
+    local colorParts = {}
+    for _, mat in ipairs(Enum.Material:GetEnumItems()) do
+        local ok, color = pcall(function() return terrain:GetMaterialColor(mat) end)
+        if ok and color then
+            table.insert(colorParts, string.format("%d,%d,%d,%d",
+                mat.Value,
+                math.floor(color.r * 255),
+                math.floor(color.g * 255),
+                math.floor(color.b * 255)
+            ))
+        end
+    end
+    table.insert(buf, '<BinaryString name="MaterialColors">' .. table.concat(colorParts, ",") .. '</BinaryString>')
+
+    -- Water properties
+    table.insert(buf, '<float name="WaterWaveSize">' .. tostring(terrain.WaterWaveSize) .. '</float>')
+    table.insert(buf, '<float name="WaterWaveSpeed">' .. tostring(terrain.WaterWaveSpeed) .. '</float>')
+    table.insert(buf, '<float name="WaterReflectance">' .. tostring(terrain.WaterReflectance) .. '</float>')
+    table.insert(buf, '<float name="WaterTransparency">' .. tostring(terrain.WaterTransparency) .. '</float>')
+    table.insert(buf, '<float name="GlobeRadius">' .. tostring(terrain.GlobeRadius) .. '</float>')
+
+    -- TerrainRegion bounds
+    table.insert(buf, '<Region3 name="TerrainRegion">' .. serialize_Region3(terrain.TerrainRegion) .. '</Region3>')
+
+    -- AcquisitionMethod
+    table.insert(buf, '<BinaryString name="AcquisitionMethod"></BinaryString>')
+
+    table.insert(buf, '</Properties>')
+    table.insert(buf, '</Item>')
+
+    -- Write each terrain block as a Part with the material
+    for _, block in ipairs(blocks) do
+        local blockRef = get_ref(Instance.new("Part"))
+        table.insert(buf, '<Item class="Part" referent="' .. blockRef .. '">')
+        table.insert(buf, '<Properties>')
+        table.insert(buf, '<string name="Name">' .. block.material.Name .. '</string>')
+        table.insert(buf, '<Ref name="Parent">' .. terrainRef .. '</Ref>')
+
+        -- Size
+        table.insert(buf, '<Vector3 name="Size">' .. serialize_Vector3(block.size) .. '</Vector3>')
+
+        -- Position (center of block)
+        local center = block.pos + block.size / 2
+        local cf = CFrame.new(center)
+        table.insert(buf, '<CFrame name="CFrame">' .. serialize_CFrame(cf) .. '</CFrame>')
+
+        -- Material
+        table.insert(buf, '<int name="formFactor">3</int>')
+        table.insert(buf, '<int name="Material">' .. tostring(block.material.Value) .. '</int>')
+        table.insert(buf, '<bool name="Anchored">true</bool>')
+        table.insert(buf, '<bool name="CanCollide">true</bool>')
+        table.insert(buf, '<bool name="TopSurface">0</bool>')
+        table.insert(buf, '<bool name="BottomSurface">0</bool>')
+
+        table.insert(buf, '</Properties>')
+        table.insert(buf, '</Item>')
+    end
+
+    loader:update("Terrain", 97, string.format("Terrain saved: %d blocks, %d voxels", #blocks, totalVoxels))
+end
+
+-- ========================================
 -- 20. SAVE EXTRA (NilInstances, etc.)
 -- ========================================
 
@@ -1267,6 +1475,10 @@ local function synsaveinstance(customOptions)
             local nilInstances = getnilinstances()
             save_extra_container("NilInstances", nilInstances, buf, refMap, options)
         end
+
+        -- Terrain (Full Map Extraction)
+        loader:update("Terrain", 88, "Extracting terrain geometry...")
+        save_terrain(workspace.Terrain, buf, refMap, loader)
     end
 
     -- Scripts-only mode
