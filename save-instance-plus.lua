@@ -1,10 +1,108 @@
---!native
---!optimize 2
--- Universal Syn Save Instance++ Recreated
--- Full game dumper: scripts, models, terrain, GUI, everything
--- Works on: Solara, Fluxus, Delta, Celery, Wave, and more
+-- ========================================
+-- 0. LOADING STRING / STATUS TRACKER
+-- ========================================
 
-local GlobalState = {}
+-- Purpose: Shows the user what the script is currently doing during long operations.
+-- Without this, the executor would appear frozen and the user might think it crashed.
+-- The loading string updates in real-time with:
+--   [MYSTRY] Phase: Scanning game | Progress: 23% | Elapsed: 5s | Spinner: /
+-- This keeps the user informed and prevents accidental executor closure.
+
+local LoadingString = {}
+LoadingString.__index = LoadingString
+
+function LoadingString.new()
+    local self = setmetatable({}, LoadingString)
+    self.phase = "Initializing"
+    self.progress = 0
+    self.status = "Loading..."
+    self.start_time = tick()
+    self.spinner_chars = { "|", "/", "-", "\\" }
+    self.spinner_idx = 1
+    self.gui = nil
+    self.label = nil
+    self.conn = nil
+    return self
+end
+
+function LoadingString:spinner()
+    local c = self.spinner_chars[self.spinner_idx]
+    self.spinner_idx = self.spinner_idx % #self.spinner_chars + 1
+    return c
+end
+
+function LoadingString:elapsed()
+    return math.floor(tick() - self.start_time)
+end
+
+function LoadingString:build_text()
+    return string.format("[MYSTRY] Phase: %s | Progress: %d%% | Elapsed: %ds | %s",
+        self.phase, self.progress, self:elapsed(), self:spinner())
+end
+
+function LoadingString:show()
+    if self.gui then return end
+    local parent = gethui and gethui() or game:GetService("CoreGui")
+    self.gui = Instance.new("ScreenGui")
+    self.gui.Name = "MYSTRY_Loader_" .. tostring(math.random(100000, 999999))
+    self.gui.DisplayOrder = 2000000000
+    self.gui.ResetOnSpawn = false
+    if protectgui then protectgui(self.gui) end
+
+    self.label = Instance.new("TextLabel")
+    self.label.Size = UDim2.new(0, 400, 0, 40)
+    self.label.Position = UDim2.new(0.5, -200, 0.92, -20)
+    self.label.BackgroundTransparency = 0.2
+    self.label.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    self.label.TextColor3 = Color3.fromRGB(0, 200, 255)
+    self.label.TextSize = 14
+    self.label.Font = Enum.Font.GothamBold
+    self.label.Text = self:build_text()
+    self.label.BorderSizePixel = 0
+    self.label.Parent = self.gui
+    self.gui.Parent = parent
+
+    -- Update every 0.25s
+    self.conn = RunService.Heartbeat:Connect(function()
+        if self.label and self.label.Parent then
+            self.label.Text = self:build_text()
+        end
+    end)
+end
+
+function LoadingString:update(phase, progress, status)
+    if phase then self.phase = phase end
+    if progress then self.progress = progress end
+    if status then self.status = status end
+    if self.label then
+        self.label.Text = self:build_text()
+    end
+end
+
+function LoadingString:success(msg)
+    self:update("Complete", 100, msg or "Done!")
+    if self.label then
+        self.label.TextColor3 = Color3.fromRGB(100, 255, 100)
+    end
+end
+
+function LoadingString:error(msg)
+    self:update("Error", 0, msg or "Failed!")
+    if self.label then
+        self.label.TextColor3 = Color3.fromRGB(255, 80, 80)
+    end
+end
+
+function LoadingString:destroy()
+    if self.conn then self.conn:Disconnect() end
+    if self.gui then
+        delay(3, function()
+            if self.gui and self.gui.Parent then
+                self.gui:Destroy()
+            end
+        end)
+    end
+end
 
 -- ========================================
 -- 1. STRING UTILITIES
@@ -1040,47 +1138,13 @@ local function synsaveinstance(customOptions)
         end
     end
 
-    -- Status GUI
-    local statusGui = nil
-    local statusLabel = nil
+    -- Loading string (replaces old status GUI)
+    local loader = LoadingString.new()
     if options.show_status then
-        local parent = gethui and gethui() or game:GetService("CoreGui")
-        statusGui = Instance.new("ScreenGui")
-        statusGui.Name = "SSI++_" .. tostring(math.random(100000, 999999))
-        statusGui.DisplayOrder = 2000000000
-        statusGui.ResetOnSpawn = false
-
-        statusLabel = Instance.new("TextLabel")
-        statusLabel.Size = UDim2.new(0, 300, 0, 50)
-        statusLabel.Position = UDim2.new(0.5, -150, 0.9, -25)
-        statusLabel.BackgroundTransparency = 0.3
-        statusLabel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-        statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-        statusLabel.TextSize = 16
-        statusLabel.Font = Enum.Font.GothamBold
-        statusLabel.Text = "SSI++: Saving..."
-        statusLabel.BorderSizePixel = 0
-        statusLabel.Parent = statusGui
-
-        protectgui(statusGui)
-        statusGui.Parent = parent
+        loader:show()
     end
 
-    local function update_status(text, color)
-        if statusLabel then
-            statusLabel.Text = text
-            if color then statusLabel.TextColor3 = color end
-        end
-    end
-
-    -- Spinner
-    local spinner_chars = { "|", "/", "-", "\\" }
-    local spinner_idx = 1
-    local function spinner()
-        local c = spinner_chars[spinner_idx]
-        spinner_idx = spinner_idx % #spinner_chars + 1
-        return c
-    end
+    loader:update("Initializing", 0, "Setting up executor APIs")
 
     -- Anti-idle
     local antiIdleConn = nil
@@ -1101,7 +1165,7 @@ local function synsaveinstance(customOptions)
 
     -- SafeMode
     if options.safe_mode then
-        update_status("[SAFEMODE] Saving.. Do NOT leave [WARNING] LVL7 Executor RECOMMENDED", Color3.fromRGB(255, 100, 100))
+        loader:update("SafeMode", 0, "[SAFEMODE] Saving.. Do NOT leave [WARNING] LVL7 Executor RECOMMENDED")
         if setthreadidentity then
             setthreadidentity(2)
         end
@@ -1145,7 +1209,7 @@ local function synsaveinstance(customOptions)
     local scriptCount = 0
     local failCount = 0
 
-    update_status("SSI++: Scanning game" .. spinner())
+    loader:update("Scanning", 5, "Scanning game hierarchy")
 
     -- Write header
     table.insert(buf, '<?xml version="1.0" encoding="UTF-8"?>')
@@ -1157,11 +1221,13 @@ local function synsaveinstance(customOptions)
         if options.isolate_starter_player then
             local sp = game:GetService("StarterPlayer")
             if sp then
+                loader:update("StarterPlayer", 10, "Saving StarterPlayer")
                 save_instance(sp, buf, refMap, options)
             end
         end
 
         -- Main hierarchy
+        loader:update("Workspace", 15, "Saving Workspace hierarchy")
         for _, child in ipairs(game:GetChildren()) do
             if child ~= game:GetService("Players") or not options.isolate_local_player then
                 if options.remove_player_characters and child:IsA("Model") then
@@ -1174,6 +1240,7 @@ local function synsaveinstance(customOptions)
 
         -- LocalPlayer isolation
         if options.isolate_local_player then
+            loader:update("LocalPlayer", 60, "Saving LocalPlayer data")
             local lp = get_local_player()
             if lp then
                 local lpRef = get_ref(lp)
@@ -1184,6 +1251,7 @@ local function synsaveinstance(customOptions)
 
         -- Players
         if options.isolate_players then
+            loader:update("Players", 70, "Saving all Players")
             local players = game:GetService("Players")
             for _, player in ipairs(players:GetPlayers()) do
                 if player ~= game:GetService("Players").LocalPlayer or not options.isolate_local_player then
@@ -1194,14 +1262,15 @@ local function synsaveinstance(customOptions)
 
         -- NilInstances
         if options.nil_instances then
+            loader:update("NilInstances", 85, "Saving Nil instances")
             local nilInstances = getnilinstances()
-            update_status("SSI++: Saving nil instances" .. spinner())
             save_extra_container("NilInstances", nilInstances, buf, refMap, options)
         end
     end
 
     -- Scripts-only mode
     if options.mode == "scripts" then
+        loader:update("Scripts", 10, "Scanning for all scripts")
         table.insert(buf, '<Item class="Folder" referent="' .. get_ref(Instance.new("Folder")) .. '">')
         table.insert(buf, '<Properties>')
         table.insert(buf, '<string name="Name">Scripts</string>')
@@ -1234,7 +1303,7 @@ local function synsaveinstance(customOptions)
     -- Close root
     table.insert(buf, '</roblox>')
 
-    update_status("SSI++: Writing file" .. spinner())
+    loader:update("Writing", 95, "Writing output file")
 
     -- Build final string
     local totalStr = table.concat(buf, "\n")
@@ -1273,17 +1342,17 @@ local function synsaveinstance(customOptions)
 
     -- Status
     if writeSuccess then
-        update_status(string.format("Saved! Time: %dms; Size: %s MB", elapsed, sizeMB), Color3.fromRGB(100, 255, 100))
-        print(string.format("[SSI++] %s (%s MB in %dms)", fileName, sizeMB, elapsed))
+        loader:success(string.format("Saved! Time: %dms | Size: %s MB", elapsed, sizeMB))
+        print(string.format("[MYSTRY] %s (%s MB in %dms)", fileName, sizeMB, elapsed))
     else
-        update_status("Failed! Check F9 console", Color3.fromRGB(255, 100, 100))
-        print("[SSI++] Failed to write file")
+        loader:error("Failed! Check F9 console for errors")
+        print("[MYSTRY] Failed to write file")
     end
 
     -- README
     if options.readme and writefile then
         local readme = string.format([[
--- SSI++ Save Info
+-- MYSTRY Decompiler - Save Info
 -- Game: %s
 -- PlaceId: %d
 -- Executor: %s
@@ -1300,13 +1369,7 @@ local function synsaveinstance(customOptions)
 
     -- Cleanup
     if antiIdleConn then antiIdleConn:Disconnect() end
-    if statusGui then
-        delay(3, function()
-            if statusGui and statusGui.Parent then
-                statusGui:Destroy()
-            end
-        end)
-    end
+    loader:destroy()
 
     -- Shutdown
     if options.shutdown_when_done then
